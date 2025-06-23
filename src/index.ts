@@ -7,6 +7,18 @@ import { ArticleSummarizer } from './services/articleSummarizer';
 import { ArxivService } from './services/arxivService';
 import { PaperSummarizer } from './services/paperSummarizer';
 import * as path from 'path';
+import * as http from 'http';
+
+// 簡単なHTTPサーバーを追加（Render.com用）
+const PORT = process.env.PORT || 3000;
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Discord Voice Transcriber Bot is running!');
+});
+
+server.listen(PORT, () => {
+  console.log(`🚀 Health check server listening on port ${PORT}`);
+});
 
 // 環境変数を読み込む
 dotenv.config();
