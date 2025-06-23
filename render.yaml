@@ -1,0 +1,16 @@
+@"
+services:
+  - type: web
+    name: discord-voice-transcriber
+    env: node
+    buildCommand: "npm install && npm run build"
+    startCommand: "npm start"
+    envVars:
+      - key: DISCORD_TOKEN
+        sync: false
+      - key: GOOGLE_AI_API_KEY
+        sync: false
+      - key: OBSIDIAN_VAULT_PATH
+        value: /tmp/obsidian_vault
+    autoDeploy: true
+"@ | Out-File -FilePath render.yaml -Encoding UTF8

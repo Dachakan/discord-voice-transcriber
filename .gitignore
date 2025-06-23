@@ -10,7 +10,7 @@ dist/
 
 # Data files
 data/
-*.json
+ideas.json
 
 # IDE
 .vscode/
