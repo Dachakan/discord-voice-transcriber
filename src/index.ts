@@ -438,8 +438,8 @@ async function handleAspectRatioSelection(message: Message) {
     let prompt = '';
     
     if (data.type === 'image' && data.imageUrl) {
-      // 画像の場合 - スタイルリファレンスに合わせてライン描画風に
-      prompt = `${data.imageUrl} clean line art, minimalist sketch, whiteboard animation style, simple drawing, black and white illustration`;
+      // 画像の場合 - 純粋な線画変換（人物・机を想起させる文言を削除）
+      prompt = `${data.imageUrl} line art, black and white illustration, architectural drawing style`;
     } else if (data.type === 'audio' && data.prompt) {
       // 音声の場合
       prompt = data.prompt;
