@@ -176,6 +176,17 @@ client.on('ready', () => {
   console.log('🌐 記事自動要約機能: 有効');
   console.log('📚 論文収集機能: 有効');
   console.log('🎨 Midjourney連携: 有効');
+  
+  // 環境変数の確認
+  console.log('\n🔧 環境変数の確認:');
+  console.log(`📱 DISCORD_TOKEN: ${process.env.DISCORD_TOKEN ? '✅ 設定済み' : '❌ 未設定'}`);
+  console.log(`🤖 GOOGLE_AI_API_KEY: ${process.env.GOOGLE_AI_API_KEY ? '✅ 設定済み' : '❌ 未設定'}`);
+  console.log(`🎨 MIDJOURNEY_SREF_URL: ${process.env.MIDJOURNEY_SREF_URL ? '✅ 設定済み' : '❌ 未設定'}`);
+  if (process.env.MIDJOURNEY_SREF_URL) {
+    console.log(`   📎 スタイルリファレンスURL: ${process.env.MIDJOURNEY_SREF_URL}`);
+  }
+  console.log(`📁 OBSIDIAN_VAULT_PATH: ${process.env.OBSIDIAN_VAULT_PATH || 'デフォルト値使用'}`);
+  console.log(`🌐 PORT: ${process.env.PORT || '3000'}`);
 });
 
 // メッセージを受信したとき
@@ -422,10 +433,15 @@ async function handleAspectRatioSelection(message: Message) {
     // スタイルリファレンスがある場合は追加
     if (process.env.MIDJOURNEY_SREF_URL) {
       prompt += ` --sref ${process.env.MIDJOURNEY_SREF_URL}`;
+      console.log(`🎨 スタイルリファレンスを追加: ${process.env.MIDJOURNEY_SREF_URL}`);
+    } else {
+      console.log('⚠️ MIDJOURNEY_SREF_URLが設定されていません');
     }
     
     // 選択されたアスペクト比を追加
     prompt += ` --ar ${aspectRatio}`;
+    
+    console.log(`📝 生成されたプロンプト: ${prompt}`);
     
     // プロンプトを送信（コピーしやすい形式で）
     if (message.channel.type === 0) { // TextChannelの場合

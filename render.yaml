@@ -10,6 +10,8 @@ services:
         sync: false
       - key: GOOGLE_AI_API_KEY
         sync: false
+      - key: MIDJOURNEY_SREF_URL
+        sync: false
       - key: OBSIDIAN_VAULT_PATH
         value: /tmp/obsidian_vault
     autoDeploy: true
