@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Message, Attachment, PartialMessage, EmbedBuilder, TextChannel, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
+import { Client, GatewayIntentBits, Message, Attachment, PartialMessage, EmbedBuilder, TextChannel } from 'discord.js';
 import dotenv from 'dotenv';
 import { IdeaManager } from './services/ideaManager';
 import { TranscriptionService } from './services/transcription';
@@ -34,9 +34,17 @@ const MONITORED_CHANNELS = [
   'ひらめき',
   'discord-develop',
   'meeting',
-  '論文収集',
-  'midjourney'  // 追加
+  '論文収集'
 ];
+
+// Midjourney用のデータ保存
+const imagePromptData = new Map<string, {
+  imageUrl?: string;
+  prompt?: string;
+  replyMessageId: string;
+  type: 'image' | 'audio';
+  timestamp: number;
+}>();
 
 // 各サービスを初期化
 const ideaManager = new IdeaManager();
@@ -45,13 +53,10 @@ const articleScraper = new ArticleScraper();
 const articleSummarizer = new ArticleSummarizer(process.env.GOOGLE_AI_API_KEY!);
 const arxivService = new ArxivService();
 const paperSummarizer = new PaperSummarizer(process.env.GOOGLE_AI_API_KEY!);
-const midjourneyService = new MidjourneyService();
+const midjourneyService = new MidjourneyService(process.env.GOOGLE_AI_API_KEY!);
 
 // 論文検索用の一時保存
 let lastPaperSearch: { channelId: string; papers: any[] } | null = null;
-
-// Midjourney用の一時保存
-const imagePromptData = new Map<string, any>();
 
 // Discord Clientを初期化
 const client = new Client({
@@ -92,12 +97,12 @@ async function getObsidianVaultChannel(guild: any) {
 
 // Obsidian形式のMarkdownを生成する関数
 function generateObsidianMarkdown(idea: any, additionalInfo?: any): string {
-  const timestamp = idea.timestamp || new Date().toISOString();
+  const timestamp = idea.createdAt?.toISOString() || new Date().toISOString();
   const dateTime = timestamp.includes('_') ? formatDateTimeForDisplay(timestamp) : timestamp;
   
   let markdown = `## 🗓️ ${dateTime}\n`;
   markdown += `**📍 チャンネル**: #${idea.channel}\n`;
-  markdown += `**👤 投稿者**: ${idea.author}\n`;
+  markdown += `**👤 投稿者**: ${idea.author || 'unknown'}\n`;
   
   switch (idea.type) {
     case 'voice':
@@ -170,7 +175,7 @@ client.on('ready', () => {
   console.log(`📝 監視中のチャンネル: ${MONITORED_CHANNELS.join(', ')}`);
   console.log('🌐 記事自動要約機能: 有効');
   console.log('📚 論文収集機能: 有効');
-  console.log('🎨 Midjourney連携機能: 有効');
+  console.log('🎨 Midjourney連携: 有効');
 });
 
 // メッセージを受信したとき
@@ -180,7 +185,46 @@ client.on('messageCreate', async (message: Message) => {
   
   const channelName = (message.channel as TextChannel).name;
   
-  // コマンドは全チャンネルで有効
+  // ============================================
+  // midjourneyチャンネル専用の処理
+  // ============================================
+  if (channelName === 'midjourney') {
+    // 画像が添付されている場合
+    const imageAttachment = message.attachments.find(att => 
+      att.contentType?.startsWith('image')
+    );
+    
+    if (imageAttachment) {
+      await handleMidjourneyImage(message, imageAttachment);
+      return;
+    }
+    
+    // 音声が添付されている場合
+    const audioExtensions = ['.ogg', '.mp3', '.wav', '.m4a'];
+    const audioAttachment = message.attachments.find(att => 
+      audioExtensions.some(ext => att.name?.toLowerCase().endsWith(ext))
+    );
+    
+    if (audioAttachment) {
+      await handleMidjourneyAudio(message, audioAttachment);
+      return;
+    }
+    
+    // 番号選択の処理
+    if (/^[1-4]$/.test(message.content.trim())) {
+      await handleAspectRatioSelection(message);
+      return;
+    }
+    
+    // それ以外は通常のチャット
+    return;
+  }
+  
+  // ============================================
+  // 他のチャンネルでの既存の処理
+  // ============================================
+  
+  // コマンド処理
   if (message.content.startsWith('!')) {
     await handleCommand(message);
     return;
@@ -215,39 +259,209 @@ client.on('messageCreate', async (message: Message) => {
   }
 });
 
-// ボタンインタラクションの処理
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isButton()) return;
+// ============================================
+// Midjourneyチャンネル専用：画像処理
+// ============================================
+async function handleMidjourneyImage(message: Message, imageAttachment: Attachment) {
+  // アスペクト比選択を表示
+  const embed = new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle('🎨 アスペクト比を選択してください')
+    .setDescription(
+      '**番号を入力してください：**\n\n' +
+      '**1️⃣** → 16:9（横長）🖼️\n' +
+      '**2️⃣** → 1:1（正方形）⬜\n' +
+      '**3️⃣** → 9:16（縦長）📱\n' +
+      '**4️⃣** → 4:5（ポートレート）🖼️'
+    )
+    .setImage(imageAttachment.url)
+    .setFooter({ text: '番号を入力してください（1-4）' });
+
+  const reply = await message.reply({ embeds: [embed] });
   
-  // アスペクト比ボタンの処理
-  if (interaction.customId.startsWith('ar_')) {
-    const parts = interaction.customId.split('_');
-    const aspectRatio = `${parts[1]}:${parts[2]}`;
-    const messageId = parts[3];
-    
-    const data = imagePromptData.get(messageId);
-    if (!data || data.userId !== interaction.user.id) {
-      return interaction.reply({ 
-        content: '❌ このボタンは使用できません', 
-        ephemeral: true 
-      });
+  // ユーザーの選択を保存
+  imagePromptData.set(message.author.id, {
+    imageUrl: imageAttachment.url,
+    replyMessageId: reply.id,
+    type: 'image',
+    timestamp: Date.now()
+  });
+  
+  // 30秒後にタイムアウト
+  setTimeout(() => {
+    if (imagePromptData.has(message.author.id)) {
+      imagePromptData.delete(message.author.id);
+      reply.edit({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(0xFF0000)
+            .setTitle('⏰ タイムアウト')
+            .setDescription('時間切れです。もう一度画像を投稿してください。')
+        ]
+      }).catch(() => {});
     }
+  }, 30000);
+}
+
+// ============================================
+// Midjourneyチャンネル専用：音声処理
+// ============================================
+async function handleMidjourneyAudio(message: Message, audioAttachment: Attachment) {
+  const processingEmbed = new EmbedBuilder()
+    .setColor(0xFFFF00)
+    .setTitle('🎙️ 音声を処理中...')
+    .setDescription('文字起こし中...')
+    .setFooter({ text: 'しばらくお待ちください' });
+  
+  const reply = await message.reply({ embeds: [processingEmbed] });
+  
+  try {
+    // 音声を文字起こし（URLを直接渡す）
+    const transcription = await transcriptionService.transcribeAudio(
+      audioAttachment.url,
+      audioAttachment.contentType || 'audio/ogg'
+    );
     
-    await interaction.deferUpdate();
+    // プログレス更新
+    processingEmbed
+      .setDescription('✅ 文字起こし完了\n📝 英語プロンプトを生成中...')
+      .addFields({
+        name: '文字起こし内容',
+        value: transcription.length > 200 
+          ? transcription.substring(0, 200) + '...' 
+          : transcription
+      });
+    await reply.edit({ embeds: [processingEmbed] });
     
-    const prompt = midjourneyService.generatePrompt(data.imageUrl, aspectRatio);
-    const embed = midjourneyService.createPromptEmbed(prompt);
-    embed.setImage(data.imageUrl);
+    // 英語プロンプトを生成
+    const creativePrompt = await midjourneyService.generateCreativePrompt(transcription);
     
-    await interaction.editReply({
-      embeds: [embed],
-      components: []
+    // アスペクト比選択を表示
+    const selectEmbed = new EmbedBuilder()
+      .setColor(0x5865F2)
+      .setTitle('🎨 アスペクト比を選択してください')
+      .setDescription(
+        '**番号を入力してください：**\n\n' +
+        '**1️⃣** → 16:9（横長）🖼️\n' +
+        '**2️⃣** → 1:1（正方形）⬜\n' +
+        '**3️⃣** → 9:16（縦長）📱\n' +
+        '**4️⃣** → 4:5（ポートレート）🖼️'
+      )
+      .addFields({
+        name: '📝 生成されたプロンプト',
+        value: creativePrompt.length > 200
+          ? creativePrompt.substring(0, 200) + '...'
+          : creativePrompt
+      })
+      .setFooter({ text: '番号を入力してください（1-4）' });
+    
+    await reply.edit({ embeds: [selectEmbed] });
+    
+    // ユーザーの選択を保存
+    imagePromptData.set(message.author.id, {
+      prompt: creativePrompt,
+      replyMessageId: reply.id,
+      type: 'audio',
+      timestamp: Date.now()
     });
     
-    // データをクリーンアップ
-    imagePromptData.delete(messageId);
+    // 30秒後にタイムアウト
+    setTimeout(() => {
+      if (imagePromptData.has(message.author.id)) {
+        imagePromptData.delete(message.author.id);
+        reply.edit({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(0xFF0000)
+              .setTitle('⏰ タイムアウト')
+              .setDescription('時間切れです。もう一度音声を投稿してください。')
+          ]
+        }).catch(() => {});
+      }
+    }, 30000);
+    
+  } catch (error) {
+    console.error('音声処理エラー:', error);
+    await reply.edit({ content: '❌ 音声の処理に失敗しました' });
   }
-});
+}
+
+// ============================================
+// アスペクト比選択の処理
+// ============================================
+async function handleAspectRatioSelection(message: Message) {
+  const data = imagePromptData.get(message.author.id);
+  if (!data) return; // データがない場合は無視
+  
+  const selection = message.content.trim();
+  const ratioMap: { [key: string]: string } = {
+    '1': '16:9',
+    '2': '1:1',
+    '3': '9:16',
+    '4': '4:5'
+  };
+  
+  const aspectRatio = ratioMap[selection];
+  if (!aspectRatio) return;
+  
+  // 元のメッセージを取得
+  const replyMessage = await message.channel.messages.fetch(data.replyMessageId);
+  
+  try {
+    // プロンプトを生成
+    let prompt = '';
+    
+    if (data.type === 'image' && data.imageUrl) {
+      // 画像の場合
+      prompt = `${data.imageUrl} cinematic photography, golden hour lighting, professional quality`;
+    } else if (data.type === 'audio' && data.prompt) {
+      // 音声の場合
+      prompt = data.prompt;
+    }
+    
+    // スタイルリファレンスがある場合は追加
+    if (process.env.MIDJOURNEY_SREF_URL) {
+      prompt += ` --sref ${process.env.MIDJOURNEY_SREF_URL}`;
+    }
+    
+    // 選択されたアスペクト比を追加
+    prompt += ` --ar ${aspectRatio}`;
+    
+    // プロンプトを送信（コピーしやすい形式で）
+    if (message.channel.type === 0) { // TextChannelの場合
+      await (message.channel as TextChannel).send(prompt);
+    }
+    
+    // 完了メッセージに更新
+    const successEmbed = new EmbedBuilder()
+      .setColor(0x00FF00)
+      .setTitle('✅ プロンプト生成完了！')
+      .setDescription(
+        `**アスペクト比：${aspectRatio}**\n\n` +
+        `**📱 スマホでの使い方：**\n\n` +
+        `1️⃣ 下のメッセージを**長押し**\n` +
+        `2️⃣ **「コピー」**をタップ\n` +
+        `3️⃣ Midjourneyに**貼り付け**\n` +
+        `4️⃣ **送信！**`
+      );
+      
+    if (data.imageUrl) {
+      successEmbed.setImage(data.imageUrl);
+    }
+    
+    await replyMessage.edit({ embeds: [successEmbed] });
+    
+    // 選択メッセージを削除（クリーンに保つ）
+    await message.delete().catch(() => {});
+    
+  } catch (error) {
+    console.error('エラー:', error);
+    await replyMessage.edit({ content: '❌ エラーが発生しました' });
+  }
+  
+  // データをクリーンアップ
+  imagePromptData.delete(message.author.id);
+}
 
 // コマンド処理
 async function handleCommand(message: Message) {
@@ -262,12 +476,6 @@ async function handleCommand(message: Message) {
     case '論文':
     case 'paper':
       await handlePaperCommand(message, args);
-      break;
-    case 'wap':
-      await handleWapCommand(message);
-      break;
-    case 'wav':
-      await handleWavCommand(message);
       break;
     case 'help':
     case 'ヘルプ':
@@ -286,142 +494,6 @@ async function handleCommand(message: Message) {
   }
 }
 
-// !wap コマンド（画像からMidjourneyプロンプト生成）
-async function handleWapCommand(message: Message) {
-  const imageAttachment = message.attachments.find(att => 
-    att.contentType?.startsWith('image')
-  );
-  
-  if (!imageAttachment) {
-    return message.reply('❌ 画像を添付してください。\n使い方: `!wap` と画像を一緒に投稿');
-  }
-
-  // アスペクト比選択ボタンを作成
-  const row = new ActionRowBuilder<ButtonBuilder>()
-    .addComponents(
-      new ButtonBuilder()
-        .setCustomId(`ar_16_9_${message.id}`)
-        .setLabel('16:9 (横長)')
-        .setStyle(ButtonStyle.Primary)
-        .setEmoji('🖼️'),
-      new ButtonBuilder()
-        .setCustomId(`ar_1_1_${message.id}`)
-        .setLabel('1:1 (正方形)')
-        .setStyle(ButtonStyle.Secondary)
-        .setEmoji('⬜'),
-      new ButtonBuilder()
-        .setCustomId(`ar_9_16_${message.id}`)
-        .setLabel('9:16 (縦長)')
-        .setStyle(ButtonStyle.Secondary)
-        .setEmoji('📱'),
-      new ButtonBuilder()
-        .setCustomId(`ar_4_5_${message.id}`)
-        .setLabel('4:5 (ポートレート)')
-        .setStyle(ButtonStyle.Secondary)
-        .setEmoji('🖼️')
-    );
-
-  const embed = new EmbedBuilder()
-    .setColor(0x5865F2)
-    .setTitle('🎨 アスペクト比を選択')
-    .setDescription('生成する画像のアスペクト比を選んでください')
-    .setImage(imageAttachment.url)
-    .setFooter({ text: '30秒以内に選択してください' });
-
-  const response = await message.reply({
-    embeds: [embed],
-    components: [row]
-  });
-
-  // 一時的にデータを保存
-  imagePromptData.set(message.id, {
-    imageUrl: imageAttachment.url,
-    userId: message.author.id,
-    timestamp: Date.now()
-  });
-  
-  // 30秒後にクリーンアップ
-  setTimeout(() => {
-    imagePromptData.delete(message.id);
-  }, 30000);
-}
-
-// !wav コマンド（音声からMidjourneyプロンプト生成）
-async function handleWavCommand(message: Message) {
-  const audioExtensions = ['.ogg', '.mp3', '.wav', '.m4a'];
-  const voiceAttachment = message.attachments.find(att => 
-    audioExtensions.some(ext => att.name?.toLowerCase().endsWith(ext))
-  );
-  
-  if (!voiceAttachment) {
-    return message.reply('❌ 音声ファイルを添付してください。\n使い方: `!wav` と音声ファイルを一緒に投稿');
-  }
-
-  const processingEmbed = new EmbedBuilder()
-    .setColor(0xFFFF00)
-    .setTitle('🎙️ 処理中...')
-    .setDescription('音声を文字起こししています...');
-  
-  const processingMsg = await message.reply({ embeds: [processingEmbed] });
-  
-  try {
-    // 音声を文字起こし
-    const transcription = await transcriptionService.transcribeAudio(
-      voiceAttachment.url,  // URLを直接渡す
-      voiceAttachment.name || 'audio'
-    );
-    
-    // プログレス更新
-    processingEmbed
-      .setDescription('✅ 文字起こし完了\n📝 英語プロンプトを生成中...')
-      .addFields({
-        name: '文字起こし内容',
-        value: transcription.length > 200 
-          ? transcription.substring(0, 200) + '...' 
-          : transcription
-      });
-    await processingMsg.edit({ embeds: [processingEmbed] });
-    
-    // 英語プロンプトを生成
-    const creativePrompt = await midjourneyService.generateCreativePrompt(transcription);
-    
-    // Midjourneyプロンプトを構築
-    const fullPrompt = midjourneyService.generateTextPrompt(creativePrompt);
-    
-    // 結果を表示
-    const resultEmbed = new EmbedBuilder()
-      .setColor(0x00FF00)
-      .setTitle('✅ 音声からプロンプト生成完了')
-      .addFields(
-        {
-          name: '🎙️ 文字起こし内容',
-          value: transcription.length > 300 
-            ? transcription.substring(0, 300) + '...' 
-            : transcription
-        },
-        {
-          name: '🎨 生成された英語プロンプト',
-          value: creativePrompt
-        },
-        {
-          name: '📋 Midjourneyプロンプト（コピー用）',
-          value: `\`\`\`${fullPrompt}\`\`\``
-        }
-      )
-      .setFooter({ text: 'プロンプトをコピーしてMidjourneyで使用してください' });
-    
-    await processingMsg.edit({ embeds: [resultEmbed] });
-    
-  } catch (error) {
-    console.error('音声処理エラー:', error);
-    const errorEmbed = new EmbedBuilder()
-      .setColor(0xFF0000)
-      .setTitle('❌ エラー')
-      .setDescription('音声の処理中にエラーが発生しました。');
-    await processingMsg.edit({ embeds: [errorEmbed] });
-  }
-}
-
 // 音声ファイル処理
 async function handleAttachments(message: Message) {
   const audioExtensions = ['.ogg', '.mp3', '.wav', '.m4a'];
@@ -433,14 +505,21 @@ async function handleAttachments(message: Message) {
       const reply = await message.reply('🎙️ 音声を文字起こし中...');
       
       try {
+        // 音声を文字起こし（URLを直接渡す）
         const transcription = await transcriptionService.transcribeAudio(
-          attachment.url,  // URLを直接渡す
-          attachment.name || 'audio'
+          attachment.url,
+          attachment.contentType || 'audio/ogg'
         );
         
-        const timestamp = generateTimestamp();
-        const idea = {
-          timestamp,
+        const idea = await ideaManager.addIdea(
+          (message.channel as TextChannel).name,
+          transcription,
+          'voice'
+        );
+        
+        // 一時的なデータオブジェクトを作成してObsidian形式を生成
+        const tempIdea = {
+          timestamp: generateTimestamp(),
           content: transcription,
           type: 'voice',
           author: message.author.username,
@@ -454,10 +533,10 @@ async function handleAttachments(message: Message) {
         
         // Obsidian Vault チャンネルに投稿
         const vaultChannel = await getObsidianVaultChannel(message.guild!);
-        const obsidianMarkdown = generateObsidianMarkdown(idea);
+        const obsidianMarkdown = generateObsidianMarkdown(tempIdea);
         await vaultChannel.send(`\`\`\`markdown\n${obsidianMarkdown}\n\`\`\``);
         
-        await reply.edit(`✅ 音声の文字起こしが完了しました！\n📅 タイムスタンプ: ${formatDateTimeForDisplay(timestamp)}`);
+        await reply.edit(`✅ 音声の文字起こしが完了しました！\n📅 アイデア ID: ${idea.id}`);
         
       } catch (error) {
         console.error('音声処理エラー:', error);
@@ -475,9 +554,17 @@ async function handleArticleURL(message: Message, url: string) {
     const article = await articleScraper.scrapeArticle(url);
     const summary = await articleSummarizer.summarizeArticle(article);
     
-    const timestamp = generateTimestamp();
-    const idea = {
-      timestamp,
+    const idea = await ideaManager.addArticleIdea(
+      (message.channel as TextChannel).name,
+      url,
+      article,
+      summary,
+      []
+    );
+    
+    // 一時的なデータオブジェクトを作成してObsidian形式を生成
+    const tempIdea = {
+      timestamp: generateTimestamp(),
       content: summary,
       type: 'article',
       author: message.author.username,
@@ -493,7 +580,7 @@ async function handleArticleURL(message: Message, url: string) {
     
     // Obsidian Vault チャンネルに投稿
     const vaultChannel = await getObsidianVaultChannel(message.guild!);
-    const obsidianMarkdown = generateObsidianMarkdown(idea);
+    const obsidianMarkdown = generateObsidianMarkdown(tempIdea);
     await vaultChannel.send(`\`\`\`markdown\n${obsidianMarkdown}\n\`\`\``);
     
     const embed = new EmbedBuilder()
@@ -501,7 +588,7 @@ async function handleArticleURL(message: Message, url: string) {
       .setTitle(article.title || '記事')
       .setURL(url)
       .setDescription(summary)
-      .setFooter({ text: `保存済み | タイムスタンプ: ${formatDateTimeForDisplay(timestamp)}` });
+      .setFooter({ text: `保存済み | アイデア ID: ${idea.id}` });
     
     await processingMsg.edit({ content: '✅ 記事を要約しました！', embeds: [embed] });
     
@@ -513,9 +600,15 @@ async function handleArticleURL(message: Message, url: string) {
 
 // テキストメッセージ処理
 async function handleTextMessage(message: Message) {
-  const timestamp = generateTimestamp();
-  const idea = {
-    timestamp,
+  const idea = await ideaManager.addIdea(
+    (message.channel as TextChannel).name,
+    message.content,
+    'text'
+  );
+  
+  // 一時的なデータオブジェクトを作成してObsidian形式を生成
+  const tempIdea = {
+    timestamp: generateTimestamp(),
     content: message.content,
     type: 'text',
     author: message.author.username,
@@ -525,10 +618,10 @@ async function handleTextMessage(message: Message) {
   
   // Obsidian Vault チャンネルに投稿
   const vaultChannel = await getObsidianVaultChannel(message.guild!);
-  const obsidianMarkdown = generateObsidianMarkdown(idea);
+  const obsidianMarkdown = generateObsidianMarkdown(tempIdea);
   await vaultChannel.send(`\`\`\`markdown\n${obsidianMarkdown}\n\`\`\``);
   
-  await message.reply(`💡 アイデアを保存しました！\n📅 タイムスタンプ: ${formatDateTimeForDisplay(timestamp)}`);
+  await message.reply(`💡 アイデアを保存しました！\n📅 アイデア ID: ${idea.id}`);
 }
 
 // 論文コマンド処理
@@ -651,9 +744,22 @@ async function selectPapers(message: Message, args: string[]) {
       const paper = papers[index];
       const summary = await paperSummarizer.summarizePaper(paper);
       
-      const timestamp = generateTimestamp();
-      const idea = {
-        timestamp,
+      const idea = await ideaManager.addPaperIdea(
+        {
+          arxivId: paper.arxivId,
+          title: paper.title,
+          authors: paper.authors,
+          publishedDate: paper.published.toISOString(),
+          categories: paper.categories,
+          pdfUrl: paper.pdfUrl,
+          abstract: paper.abstract
+        },
+        summary
+      );
+      
+      // 一時的なデータオブジェクトを作成してObsidian形式を生成
+      const tempIdea = {
+        timestamp: generateTimestamp(),
         content: summary.summary,
         type: 'paper',
         author: message.author.username,
@@ -664,8 +770,8 @@ async function selectPapers(message: Message, args: string[]) {
           authors: paper.authors.join(', '),
           category: paper.categories.join(', '),
           arxivId: paper.id,
-          url: paper.link,
-          abstract: paper.summary
+          url: paper.pdfUrl,
+          abstract: paper.abstract
         }
       };
       
@@ -674,12 +780,12 @@ async function selectPapers(message: Message, args: string[]) {
         detailedSummary: `**重要な発見:**\n${summary.keyFindings.join('\n')}\n\n**応用可能性:**\n${summary.applications}`
       } : undefined;
       
-      const obsidianMarkdown = generateObsidianMarkdown(idea, additionalInfo);
+      const obsidianMarkdown = generateObsidianMarkdown(tempIdea, additionalInfo);
       await vaultChannel.send(`\`\`\`markdown\n${obsidianMarkdown}\n\`\`\``);
       
       results.push({
         success: true,
-        timestamp: timestamp,
+        timestamp: generateTimestamp(),
         title: paper.title.substring(0, 50) + '...'
       });
       
@@ -736,8 +842,6 @@ async function showHelp(message: Message) {
       { name: '💡 テキストメモ', value: '監視対象チャンネルに投稿すると自動保存' },
       { name: '📰 記事要約', value: 'URLを含むメッセージを投稿すると自動要約' },
       { name: '📚 論文検索', value: '`!論文` でメニュー表示\n`!論文 [検索語]` で検索' },
-      { name: '🖼️ Midjourney (画像)', value: '`!wap` と画像を投稿してプロンプト生成' },
-      { name: '🎙️ Midjourney (音声)', value: '`!wav` と音声を投稿してプロンプト生成' },
       { name: '📊 統計', value: '`!stats` で保存状況を確認' },
       { name: '📋 一覧', value: '`!list` で最近のアイデア一覧' },
       { name: '🧪 テスト', value: '`!test` でAPI動作確認' }
@@ -747,8 +851,8 @@ async function showHelp(message: Message) {
       value: '#obsidian-vault チャンネルに自動投稿'
     })
     .addFields({
-      name: '💡 Midjourneyコマンドについて',
-      value: '`!wap`と`!wav`は全チャンネルで使用可能です'
+      name: '🎨 Midjourney画像生成',
+      value: '#midjourneyチャンネルに画像や音声を投稿すると\n自動でプロンプトを生成します'
     });
   
   await message.reply({ embeds: [embed] });
@@ -785,12 +889,11 @@ async function showRecentIdeas(message: Message, channelFilter?: string) {
     const icon = idea.type === 'voice' ? '🎙️' : 
                  idea.type === 'article' ? '📰' : 
                  idea.type === 'paper' ? '📚' : '💡';
-    const timestamp = idea.timestamp || 'unknown';
-    const author = idea.author || 'unknown';
+    const timestamp = idea.createdAt ? idea.createdAt.toISOString() : 'unknown';
     const channel = idea.channel || 'unknown';
     const content = idea.content || '';
     
-    response += `${icon} **${timestamp}** - ${author} in #${channel}\n`;
+    response += `${icon} **${idea.id}** - #${channel}\n`;
     response += `   ${content.substring(0, 50)}...\n\n`;
   });
   
