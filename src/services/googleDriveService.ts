@@ -14,13 +14,28 @@ export class GoogleDriveService {
     this.folderId = '1hlgcrDf_4hLJpemYfadP5zZ3PTrxSR2t';
     
     // 認証設定
-    this.auth = new google.auth.GoogleAuth({
-      keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE,
-      scopes: [
-        'https://www.googleapis.com/auth/drive.file',
-        'https://www.googleapis.com/auth/drive'
-      ],
-    });
+    if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+      // 環境変数から直接JSON文字列を読み込み
+      const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+      this.auth = new google.auth.GoogleAuth({
+        credentials: credentials,
+        scopes: [
+          'https://www.googleapis.com/auth/drive.file',
+          'https://www.googleapis.com/auth/drive'
+        ],
+      });
+    } else if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE) {
+      // ファイルパスから読み込み（ローカル開発用）
+      this.auth = new google.auth.GoogleAuth({
+        keyFile: process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE,
+        scopes: [
+          'https://www.googleapis.com/auth/drive.file',
+          'https://www.googleapis.com/auth/drive'
+        ],
+      });
+    } else {
+      throw new Error('Google Drive認証情報が設定されていません');
+    }
 
     console.log('📁 GoogleDriveService 初期化完了');
   }
@@ -115,23 +130,37 @@ export class GoogleDriveService {
    * サービスの設定状況を確認
    */
   checkConfiguration(): { configured: boolean; message: string } {
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE) {
-      return {
-        configured: false,
-        message: 'GOOGLE_SERVICE_ACCOUNT_KEY_FILE環境変数が設定されていません'
-      };
+    if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
+      try {
+        JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_KEY);
+        return {
+          configured: true,
+          message: 'Google Drive連携が正常に設定されています（環境変数）'
+        };
+      } catch (error) {
+        return {
+          configured: false,
+          message: 'GOOGLE_SERVICE_ACCOUNT_KEY環境変数のJSON形式が不正です'
+        };
+      }
     }
 
-    if (!fs.existsSync(process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE)) {
+    if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE) {
+      if (!fs.existsSync(process.env.GOOGLE_SERVICE_ACCOUNT_KEY_FILE)) {
+        return {
+          configured: false,
+          message: 'サービスアカウントキーファイルが見つかりません'
+        };
+      }
       return {
-        configured: false,
-        message: 'サービスアカウントキーファイルが見つかりません'
+        configured: true,
+        message: 'Google Drive連携が正常に設定されています（ファイル）'
       };
     }
 
     return {
-      configured: true,
-      message: 'Google Drive連携が正常に設定されています'
+      configured: false,
+      message: 'GOOGLE_SERVICE_ACCOUNT_KEY または GOOGLE_SERVICE_ACCOUNT_KEY_FILE環境変数が設定されていません'
     };
   }
 } 
