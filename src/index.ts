@@ -438,8 +438,8 @@ async function handleAspectRatioSelection(message: Message) {
     let prompt = '';
     
     if (data.type === 'image' && data.imageUrl) {
-      // 画像の場合 - 元の内容を保持してスタイルのみ適用
-      prompt = `${data.imageUrl}`;
+      // 画像の場合 - 元の内容を保持してスタイルのみ適用（v7対応でテキスト追加）
+      prompt = `${data.imageUrl} convert to line art style`;
     } else if (data.type === 'audio' && data.prompt) {
       // 音声の場合
       prompt = data.prompt;
