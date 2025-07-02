@@ -7,6 +7,7 @@ import { ArticleSummarizer } from './services/articleSummarizer';
 import { ArxivService } from './services/arxivService';
 import { PaperSummarizer } from './services/paperSummarizer';
 import { MidjourneyService } from './services/midjourneyService';
+import { GoogleDriveService } from './services/googleDriveService';
 import * as path from 'path';
 import * as http from 'http';
 
@@ -54,6 +55,7 @@ const articleSummarizer = new ArticleSummarizer(process.env.GOOGLE_AI_API_KEY!);
 const arxivService = new ArxivService();
 const paperSummarizer = new PaperSummarizer(process.env.GOOGLE_AI_API_KEY!);
 const midjourneyService = new MidjourneyService(process.env.GOOGLE_AI_API_KEY!);
+const googleDriveService = new GoogleDriveService();
 
 // 論文検索用の一時保存
 let lastPaperSearch: { channelId: string; papers: any[] } | null = null;
@@ -187,11 +189,24 @@ client.on('ready', () => {
   }
   console.log(`📁 OBSIDIAN_VAULT_PATH: ${process.env.OBSIDIAN_VAULT_PATH || 'デフォルト値使用'}`);
   console.log(`🌐 PORT: ${process.env.PORT || '3000'}`);
+  
+  // Google Drive設定確認
+  const driveConfig = googleDriveService.checkConfiguration();
+  console.log(`📁 Google Drive: ${driveConfig.configured ? '✅ 設定済み' : '❌ 未設定'}`);
+  if (!driveConfig.configured) {
+    console.log(`   ⚠️ ${driveConfig.message}`);
+  }
 });
 
 // メッセージを受信したとき
 client.on('messageCreate', async (message: Message) => {
-  if (message.author.bot) return;
+  if (message.author.bot) {
+    // Midjourneyボットからのアップスケール画像を処理
+    if (message.author.username === 'Midjourney Bot' && message.attachments.size > 0) {
+      await handleMidjourneyUpscaleImage(message);
+    }
+    return;
+  }
   if (!message.guild) return;
   
   const channelName = (message.channel as TextChannel).name;
@@ -927,6 +942,68 @@ setInterval(() => {
     }
   }
 }, 30 * 60 * 1000);
+
+// ============================================
+// Midjourneyアップスケール画像の自動保存
+// ============================================
+async function handleMidjourneyUpscaleImage(message: Message) {
+  try {
+    // アップスケール画像かどうかを判定
+    const isUpscaleImage = message.content.includes('Image #') || 
+                          message.content.includes('Upscaled by') ||
+                          (message.attachments.size > 0 && message.content.length < 100);
+    
+    if (!isUpscaleImage) return;
+
+    console.log('🎨 Midjourneyアップスケール画像を検出しました');
+    
+    for (const attachment of message.attachments.values()) {
+      if (attachment.contentType?.startsWith('image')) {
+        try {
+          // ファイル名を生成（メッセージ内容とタイムスタンプから）
+          const promptInfo = message.content || 'midjourney_upscale';
+          const fileName = googleDriveService.generateFileName(promptInfo, '1x1');
+          
+          // Google Driveにアップロード
+          const driveUrl = await googleDriveService.uploadImageFromUrl(attachment.url, fileName);
+          
+          // 成功メッセージを送信
+          const successEmbed = new EmbedBuilder()
+            .setColor(0x00FF00)
+            .setTitle('📁 Google Drive保存完了！')
+            .setDescription(`アップスケール画像を自動保存しました`)
+            .addFields(
+              { name: '📎 ファイル名', value: fileName },
+              { name: '🔗 Google Drive', value: `[ファイルを開く](${driveUrl})` }
+            )
+            .setThumbnail(attachment.url)
+            .setTimestamp();
+
+          if (message.channel.type === 0) {
+            await (message.channel as TextChannel).send({ embeds: [successEmbed] });
+          }
+          
+        } catch (error) {
+          console.error('❌ Google Drive保存エラー:', error);
+          
+          // エラーメッセージを送信
+          const errorEmbed = new EmbedBuilder()
+            .setColor(0xFF0000)
+            .setTitle('❌ 保存エラー')
+            .setDescription('Google Driveへの保存に失敗しました')
+            .addFields({ name: 'エラー', value: error instanceof Error ? error.message : 'Unknown error' })
+            .setTimestamp();
+
+          if (message.channel.type === 0) {
+            await (message.channel as TextChannel).send({ embeds: [errorEmbed] });
+          }
+        }
+      }
+    }
+  } catch (error) {
+    console.error('❌ アップスケール画像処理エラー:', error);
+  }
+}
 
 // Botをログイン
 client.login(process.env.DISCORD_TOKEN);
