@@ -438,8 +438,8 @@ async function handleAspectRatioSelection(message: Message) {
     let prompt = '';
     
     if (data.type === 'image' && data.imageUrl) {
-      // 画像の場合 - スタイルリファレンスに合わせてライン描画風に
-      prompt = `${data.imageUrl} clean line art, minimalist sketch, whiteboard animation style, simple drawing, black and white illustration`;
+      // 画像の場合 - 元の内容を保持してスタイルのみ適用
+      prompt = `${data.imageUrl}`;
     } else if (data.type === 'audio' && data.prompt) {
       // 音声の場合
       prompt = data.prompt;
@@ -447,10 +447,16 @@ async function handleAspectRatioSelection(message: Message) {
     
     // スタイルリファレンスがある場合は追加
     if (process.env.MIDJOURNEY_SREF_URL) {
-      prompt += ` --sref ${process.env.MIDJOURNEY_SREF_URL} --sw 1000 --stylize 1000`;
+      prompt += ` --sref ${process.env.MIDJOURNEY_SREF_URL} --sw 200`;
       console.log(`🎨 スタイルリファレンスを追加: ${process.env.MIDJOURNEY_SREF_URL}`);
     } else {
       console.log('⚠️ MIDJOURNEY_SREF_URLが設定されていません');
+    }
+    
+    // 画像の場合は画像リファレンスの重みを強化
+    if (data.type === 'image' && data.imageUrl) {
+      prompt += ` --iw 3.0`;
+      console.log(`🖼️ 画像リファレンスの重みを追加: --iw 3.0`);
     }
     
     // 選択されたアスペクト比を追加
