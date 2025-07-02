@@ -423,8 +423,8 @@ async function handleAspectRatioSelection(message: Message) {
     let prompt = '';
     
     if (data.type === 'image' && data.imageUrl) {
-      // 画像の場合
-      prompt = `${data.imageUrl} cinematic photography, golden hour lighting, professional quality`;
+      // 画像の場合 - スタイルリファレンスに合わせてライン描画風に
+      prompt = `${data.imageUrl} clean line art, minimalist sketch, whiteboard animation style, simple drawing, black and white illustration`;
     } else if (data.type === 'audio' && data.prompt) {
       // 音声の場合
       prompt = data.prompt;
@@ -432,7 +432,7 @@ async function handleAspectRatioSelection(message: Message) {
     
     // スタイルリファレンスがある場合は追加
     if (process.env.MIDJOURNEY_SREF_URL) {
-      prompt += ` --sref ${process.env.MIDJOURNEY_SREF_URL}`;
+      prompt += ` --sref ${process.env.MIDJOURNEY_SREF_URL} --sw 100`;
       console.log(`🎨 スタイルリファレンスを追加: ${process.env.MIDJOURNEY_SREF_URL}`);
     } else {
       console.log('⚠️ MIDJOURNEY_SREF_URLが設定されていません');
