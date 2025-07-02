@@ -432,7 +432,7 @@ async function handleAspectRatioSelection(message: Message) {
     
     // スタイルリファレンスがある場合は追加
     if (process.env.MIDJOURNEY_SREF_URL) {
-      prompt += ` --sref ${process.env.MIDJOURNEY_SREF_URL} --sw 100`;
+      prompt += ` --sref ${process.env.MIDJOURNEY_SREF_URL} --sw 1000 --stylize 1000`;
       console.log(`🎨 スタイルリファレンスを追加: ${process.env.MIDJOURNEY_SREF_URL}`);
     } else {
       console.log('⚠️ MIDJOURNEY_SREF_URLが設定されていません');
