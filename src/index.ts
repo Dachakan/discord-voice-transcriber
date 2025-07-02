@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Message, Attachment, PartialMessage, EmbedBuilder, TextChannel } from 'discord.js';
+import { Client, GatewayIntentBits, Message, Attachment, PartialMessage, EmbedBuilder, TextChannel, ActionRowBuilder, ButtonBuilder, ButtonStyle } from 'discord.js';
 import dotenv from 'dotenv';
 import { IdeaManager } from './services/ideaManager';
 import { TranscriptionService } from './services/transcription';
@@ -6,6 +6,7 @@ import { ArticleScraper } from './services/articleScraper';
 import { ArticleSummarizer } from './services/articleSummarizer';
 import { ArxivService } from './services/arxivService';
 import { PaperSummarizer } from './services/paperSummarizer';
+import { MidjourneyService } from './services/midjourneyService';
 import * as path from 'path';
 import * as http from 'http';
 
@@ -33,7 +34,8 @@ const MONITORED_CHANNELS = [
   'ひらめき',
   'discord-develop',
   'meeting',
-  '論文収集'
+  '論文収集',
+  'midjourney'  // 追加
 ];
 
 // 各サービスを初期化
@@ -43,22 +45,13 @@ const articleScraper = new ArticleScraper();
 const articleSummarizer = new ArticleSummarizer(process.env.GOOGLE_AI_API_KEY!);
 const arxivService = new ArxivService();
 const paperSummarizer = new PaperSummarizer(process.env.GOOGLE_AI_API_KEY!);
+const midjourneyService = new MidjourneyService();
 
 // 論文検索用の一時保存
 let lastPaperSearch: { channelId: string; papers: any[] } | null = null;
 
-// 論文検索のカテゴリー定義
-const paperCategories: Record<string, { name: string; query: string }> = {
-    '1': { name: 'AI・機械学習', query: 'artificial intelligence OR machine learning OR deep learning' },
-    '2': { name: '自然言語処理', query: 'natural language processing OR NLP OR transformer' },
-    '3': { name: 'コンピュータビジョン', query: 'computer vision OR image recognition OR object detection' },
-    '4': { name: 'ロボティクス', query: 'robotics OR robot control OR autonomous systems' },
-    '5': { name: '量子コンピュータ', query: 'quantum computing OR quantum algorithm OR quantum machine learning' },
-    '6': { name: '医療・ヘルスケアAI', query: 'medical AI OR healthcare artificial intelligence OR clinical ML' },
-    '7': { name: '建設・建築技術', query: 'construction technology OR BIM OR civil engineering' },
-    '8': { name: '自動運転', query: 'autonomous driving OR self-driving car OR vehicle automation' },
-    '9': { name: 'セキュリティ・暗号', query: 'cybersecurity OR cryptography OR blockchain' }
-};
+// Midjourney用の一時保存
+const imagePromptData = new Map<string, any>();
 
 // Discord Clientを初期化
 const client = new Client({
@@ -69,9 +62,6 @@ const client = new Client({
     GatewayIntentBits.GuildVoiceStates
   ]
 });
-
-// URL検出の正規表現
-const URL_REGEX = /https?:\/\/(www\.)?[-a-zA-Z0-9@:%._\+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_\+.~#?&//=]*)/gi;
 
 // 日時フォーマット関数
 function formatDateTimeForDisplay(timestamp: string): string {
@@ -85,40 +75,83 @@ function formatDateTimeForDisplay(timestamp: string): string {
   return `${year}-${month}-${day} ${hour}:${minute}:${second}`;
 }
 
-// チャンネルがテキストベースかチェック
-function isTextBasedChannel(channel: any): channel is TextChannel {
-    return 'send' in channel;
-}
-
-// 音声ファイルかどうかチェック
-function isVoiceFile(attachment: Attachment): boolean {
-    const voiceExtensions = ['.ogg', '.mp3', '.wav', '.m4a'];
-    return voiceExtensions.some(ext => 
-        attachment.name?.toLowerCase().endsWith(ext)
-    );
-}
-
 // Obsidian Vault チャンネルを取得する関数
-async function getObsidianVaultChannel(guild: any): Promise<TextChannel> {
-  console.log(`🔍 Obsidian Vaultチャンネルを検索中...`);
+async function getObsidianVaultChannel(guild: any) {
   let channel = guild.channels.cache.find((ch: any) => ch.name === OBSIDIAN_VAULT_CHANNEL_NAME);
   
   if (!channel) {
-    console.log(`📁 Obsidian Vaultチャンネルが見つからないため、作成します`);
     channel = await guild.channels.create({
       name: OBSIDIAN_VAULT_CHANNEL_NAME,
       type: 0,
       topic: 'Obsidian同期用のMarkdownデータ保管庫'
     });
-    console.log(`✅ Obsidian Vaultチャンネルを作成しました: ${channel.id}`);
-  } else {
-    console.log(`✅ Obsidian Vaultチャンネルを発見: ${channel.id}`);
   }
   
-  return channel as TextChannel;
+  return channel;
 }
 
-// タイムスタンプ生成
+// Obsidian形式のMarkdownを生成する関数
+function generateObsidianMarkdown(idea: any, additionalInfo?: any): string {
+  const timestamp = idea.timestamp || new Date().toISOString();
+  const dateTime = timestamp.includes('_') ? formatDateTimeForDisplay(timestamp) : timestamp;
+  
+  let markdown = `## 🗓️ ${dateTime}\n`;
+  markdown += `**📍 チャンネル**: #${idea.channel}\n`;
+  markdown += `**👤 投稿者**: ${idea.author}\n`;
+  
+  switch (idea.type) {
+    case 'voice':
+      markdown += `**🎙️ タイプ**: 音声メモ`;
+      if (idea.metadata?.duration) {
+        markdown += ` (${idea.metadata.duration})`;
+      }
+      markdown += `\n\n### 💭 内容\n${idea.content}\n`;
+      break;
+      
+    case 'article':
+      markdown += `**📰 タイプ**: 記事要約\n`;
+      if (idea.metadata?.url) {
+        markdown += `**🔗 URL**: ${idea.metadata.url}\n`;
+      }
+      if (idea.metadata?.title) {
+        markdown += `**📌 タイトル**: ${idea.metadata.title}\n`;
+      }
+      markdown += `\n### 📊 要約\n${idea.content}\n`;
+      break;
+      
+    case 'paper':
+      markdown += `**📄 タイプ**: 論文要約\n`;
+      if (idea.metadata?.title) {
+        markdown += `\n### 📑 論文情報\n`;
+        markdown += `**タイトル**: ${idea.metadata.title}\n`;
+        if (idea.metadata?.authors) {
+          markdown += `**著者**: ${idea.metadata.authors}\n`;
+        }
+        if (idea.metadata?.category) {
+          markdown += `**カテゴリ**: ${idea.metadata.category}\n`;
+        }
+      }
+      markdown += `\n### 📊 要約\n${idea.content}\n`;
+      
+      if (additionalInfo?.detailedSummary) {
+        markdown += `\n### 🔍 詳細な要約\n${additionalInfo.detailedSummary}\n`;
+      }
+      break;
+      
+    default:
+      markdown += `**📝 タイプ**: テキストメモ\n\n### 💭 内容\n${idea.content}\n`;
+  }
+  
+  if (idea.tags && idea.tags.length > 0) {
+    markdown += `\n### 🏷️ タグ\n${idea.tags.map((tag: string) => `#${tag}`).join(' ')}\n`;
+  }
+  
+  markdown += `\n---\n*↑このままObsidianにコピペ可能*`;
+  
+  return markdown;
+}
+
+// タイムスタンプ生成関数
 function generateTimestamp(): string {
   const now = new Date();
   const year = now.getFullYear();
@@ -131,145 +164,13 @@ function generateTimestamp(): string {
   return `${year}${month}${day}_${hour}${minute}${second}`;
 }
 
-// テキスト用Markdown生成
-function generateTextMarkdown(idea: any): string {
-  const timestamp = generateTimestamp();
-  const dateTime = formatDateTimeForDisplay(timestamp);
-  
-  return `# 💡 テキストメモ
-  
-**ファイル名**: text_${timestamp}.md
-**投稿日時**: ${dateTime}
-**チャンネル**: #${idea.channel}
-**投稿者**: ${idea.author || 'unknown'}
-
-## 内容
-${idea.content}
-
-${idea.tags && idea.tags.length > 0 ? `## 🏷️ タグ\n${idea.tags.map((tag: string) => `#${tag}`).join(' ')}` : ''}
-
----
-*Obsidian用Markdownファイル*`;
-}
-
-// 音声用Markdown生成
-function generateVoiceMarkdown(idea: any, transcription: string): string {
-  const timestamp = generateTimestamp();
-  const dateTime = formatDateTimeForDisplay(timestamp);
-  
-  return `# 🎤 音声メモ
-  
-**ファイル名**: voice_${timestamp}.md
-**投稿日時**: ${dateTime}
-**チャンネル**: #${idea.channel}
-**投稿者**: ${idea.author || 'unknown'}
-
-## 文字起こし内容
-${transcription}
-
-${idea.tags && idea.tags.length > 0 ? `## 🏷️ タグ\n${idea.tags.map((tag: string) => `#${tag}`).join(' ')}` : ''}
-
----
-*Obsidian用Markdownファイル*`;
-}
-
-// 記事用Markdown生成
-function generateArticleMarkdown(idea: any, articleData: any, summary: any): string {
-  const timestamp = generateTimestamp();
-  const dateTime = formatDateTimeForDisplay(timestamp);
-  
-  return `# 📰 記事要約
-  
-**ファイル名**: article_${timestamp}.md
-**投稿日時**: ${dateTime}
-**チャンネル**: #${idea.channel}
-
-## 記事情報
-- **URL**: ${idea.url || articleData.url}
-- **タイトル**: ${articleData.title}
-- **著者**: ${articleData.author || '不明'}
-- **公開日**: ${articleData.publishedDate || '不明'}
-- **サイト**: ${articleData.siteName || '不明'}
-
-## 要約
-${summary.summary || idea.content}
-
-## 🏷️ タグ
-${summary.tags ? summary.tags.map((tag: string) => `#${tag}`).join(' ') : ''}
-
----
-*Obsidian用Markdownファイル*`;
-}
-
-// 論文用のMarkdown生成関数
-function generatePaperMarkdown(idea: any, paper: any, summary: any): string {
-  const timestamp = generateTimestamp();
-  const dateTime = formatDateTimeForDisplay(timestamp);
-  
-  return `# 📚 論文要約
-
-**ファイル名**: paper_${timestamp}.md
-**投稿日時**: ${dateTime}
-**チャンネル**: #論文収集
-**要約ID**: #${idea.id}
-
-## 📑 論文情報
-- **タイトル**: ${paper.title}
-- **著者**: ${paper.authors.join(', ')}
-- **カテゴリー**: ${paper.categories.join(', ')}
-- **arXiv ID**: ${paper.arxivId}
-- **PDF**: ${paper.pdfUrl}
-- **公開日**: ${new Date(paper.published).toLocaleDateString('ja-JP')}
-
-## 📊 要約
-${summary.summary}
-
-## 🔍 重要な発見・貢献
-${summary.keyFindings.map((finding: string) => `- ${finding}`).join('\n')}
-
-## 💡 実用的な応用可能性
-${summary.applications}
-
-## 🏷️ タグ
-${summary.tags.map((tag: string) => `#${tag}`).join(' ')}
-
-## 📄 要旨（原文）
-${paper.abstract}
-
----
-*arXiv: https://arxiv.org/abs/${paper.arxivId}*
-*Obsidian用Markdownファイル*`;
-}
-
-// Markdownを分割する関数
-function splitMarkdown(markdown: string, maxLength: number): string[] {
-  const chunks: string[] = [];
-  const lines = markdown.split('\n');
-  let currentChunk = '';
-  
-  for (const line of lines) {
-    if (currentChunk.length + line.length + 1 > maxLength) {
-      chunks.push(currentChunk);
-      currentChunk = line;
-    } else {
-      currentChunk += (currentChunk ? '\n' : '') + line;
-    }
-  }
-  
-  if (currentChunk) {
-    chunks.push(currentChunk);
-  }
-  
-  return chunks;
-}
-
 // Botが起動したとき
-client.once('ready', () => {
+client.on('ready', () => {
   console.log(`✅ ${client.user?.tag} が起動しました！`);
   console.log(`📝 監視中のチャンネル: ${MONITORED_CHANNELS.join(', ')}`);
   console.log('🌐 記事自動要約機能: 有効');
   console.log('📚 論文収集機能: 有効');
-  console.log('📁 Obsidian Vaultチャンネル: 有効');
+  console.log('🎨 Midjourney連携機能: 有効');
 });
 
 // メッセージを受信したとき
@@ -277,666 +178,636 @@ client.on('messageCreate', async (message: Message) => {
   if (message.author.bot) return;
   if (!message.guild) return;
   
-  // チャンネル名をチェック
-  const channelName = 'name' in message.channel ? message.channel.name : null;
+  const channelName = (message.channel as TextChannel).name;
   
-  // コマンド処理（どのチャンネルでも実行可能）
+  // コマンドは全チャンネルで有効
   if (message.content.startsWith('!')) {
     await handleCommand(message);
     return;
   }
   
-  // 対象チャンネルでのみアイデア保存
-  if (!channelName || !MONITORED_CHANNELS.includes(channelName)) return;
+  // 監視対象チャンネルでのみ自動処理
+  if (!MONITORED_CHANNELS.includes(channelName)) return;
 
   try {
-    // URLが含まれているかチェック
-    const urls = message.content.match(URL_REGEX);
-    
-    if (urls && urls.length > 0) {
-      // URLが含まれている場合は記事として処理
-      console.log(`🌐 URLを検出: ${urls.length}件`);
-      for (const url of urls) {
-        await processArticleURL(message, url, channelName);
-      }
+    // 音声ファイルの処理
+    if (message.attachments.size > 0) {
+      await handleAttachments(message);
       return;
     }
 
-    // 音声ファイルが含まれているかチェック
-    const voiceAttachment = message.attachments.find(attachment => 
-      isVoiceFile(attachment)
-    );
-
-    if (voiceAttachment) {
-      // 音声ファイルの場合
-      console.log(`🎤 音声ファイルを検出: ${voiceAttachment.name}`);
-      await processVoiceFile(message, voiceAttachment, channelName);
-    } else if (message.content.trim()) {
-      // テキストメッセージの場合
-      console.log(`💬 テキストメッセージ処理開始: "${message.content.substring(0, 50)}..."`);
-      await processTextMessage(message, channelName);
+    // URLを含むメッセージの処理
+    const urlRegex = /(https?:\/\/[^\s]+)/g;
+    const urls = message.content.match(urlRegex);
+    if (urls && urls.length > 0) {
+      await handleArticleURL(message, urls[0]);
+      return;
     }
+
+    // 通常のテキストメッセージ
+    if (message.content.trim()) {
+      await handleTextMessage(message);
+    }
+
   } catch (error) {
-    console.error('❌ エラー:', error);
-    await message.react('❌');
+    console.error('エラー:', error);
+    await message.reply('❌ 処理中にエラーが発生しました');
   }
 });
 
-// テキストメッセージ処理
-async function processTextMessage(message: Message, channelName: string) {
-  await message.react('💡');
+// ボタンインタラクションの処理
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
   
-  const idea = await ideaManager.addIdea(channelName, message.content, 'text');
-  
-  // Obsidian Vaultチャンネルに投稿
-  try {
-    const vaultChannel = await getObsidianVaultChannel(message.guild!);
-    const markdown = generateTextMarkdown({
-      ...idea,
-      channel: channelName,
-      author: message.author.username
+  // アスペクト比ボタンの処理
+  if (interaction.customId.startsWith('ar_')) {
+    const parts = interaction.customId.split('_');
+    const aspectRatio = `${parts[1]}:${parts[2]}`;
+    const messageId = parts[3];
+    
+    const data = imagePromptData.get(messageId);
+    if (!data || data.userId !== interaction.user.id) {
+      return interaction.reply({ 
+        content: '❌ このボタンは使用できません', 
+        ephemeral: true 
+      });
+    }
+    
+    await interaction.deferUpdate();
+    
+    const prompt = midjourneyService.generatePrompt(data.imageUrl, aspectRatio);
+    const embed = midjourneyService.createPromptEmbed(prompt);
+    embed.setImage(data.imageUrl);
+    
+    await interaction.editReply({
+      embeds: [embed],
+      components: []
     });
     
-    console.log(`📝 Markdownサイズ: ${markdown.length}文字`);
-    await vaultChannel.send(`\`\`\`markdown\n${markdown}\n\`\`\``);
-    console.log(`✅ Obsidian Vaultチャンネルへの投稿完了`);
-  } catch (error) {
-    console.error(`❌ Obsidian Vaultチャンネルへの投稿エラー:`, error);
+    // データをクリーンアップ
+    imagePromptData.delete(messageId);
   }
-  
-  await message.reply(`✅ アイデア #${idea.id} として保存しました！`);
-}
-
-// 音声ファイル処理
-async function processVoiceFile(message: Message, voiceAttachment: Attachment, channelName: string) {
-  await message.react('🎤');
-  
-  try {
-    const processingMsg = await message.reply('🎙️ 音声を文字起こし中...');
-    
-    const transcription = await transcriptionService.transcribeAudio(
-      voiceAttachment.url,
-      voiceAttachment.contentType || 'audio/ogg'
-    );
-    
-    const idea = await ideaManager.addIdea(channelName, transcription, 'voice');
-    
-    // Obsidian Vaultチャンネルに投稿
-    const vaultChannel = await getObsidianVaultChannel(message.guild!);
-    const markdown = generateVoiceMarkdown({
-      ...idea,
-      channel: channelName,
-      author: message.author.username
-    }, transcription);
-    
-    await vaultChannel.send(`\`\`\`markdown\n${markdown}\n\`\`\``);
-    
-    await processingMsg.edit(`✅ アイデア #${idea.id} として保存しました！\n\n**文字起こし結果:**\n${transcription.substring(0, 200)}${transcription.length > 200 ? '...' : ''}`);
-  } catch (error) {
-    console.error('❌ 音声処理エラー:', error);
-    await message.reply('❌ 音声の文字起こしに失敗しました。');
-  }
-}
-
-// URL処理関数
-async function processArticleURL(message: Message, url: string, channelName: string) {
-  let processingMsg: Message | null = null;
-  
-  try {
-    processingMsg = await message.reply(`📰 記事を取得中... (${url})`);
-    await message.react('📰');
-    
-    const articleData = await articleScraper.scrapeArticle(url);
-    
-    if (articleData.content.length < 100) {
-      await processingMsg.edit('⚠️ 記事の内容が取得できませんでした。');
-      return;
-    }
-    
-    await processingMsg.edit('🤖 記事を要約中...');
-    const summary = await articleSummarizer.summarizeArticle(articleData);
-    const tags = articleSummarizer.generateTags(articleData, summary);
-    
-    const idea = await ideaManager.addArticleIdea(
-      channelName,
-      url,
-      articleData,
-      summary,
-      tags
-    );
-    
-    // Obsidian Vaultチャンネルに投稿
-    const vaultChannel = await getObsidianVaultChannel(message.guild!);
-    const markdown = generateArticleMarkdown({
-      ...idea,
-      url: url,
-      author: message.author.username
-    }, articleData, summary);
-    
-    await vaultChannel.send(`\`\`\`markdown\n${markdown}\n\`\`\``);
-    
-    const responseMessage = `✅ 記事を要約して保存しました！
-
-**#${idea.id}** ${articleData.title}
-${articleData.siteName ? `📰 ${articleData.siteName}` : ''}${articleData.author ? ` / ${articleData.author}` : ''}
-
-📝 **要約:**
-${summary.length > 400 ? summary.substring(0, 400) + '...' : summary}
-
-🏷️ ${tags.map((t: string) => `#${t}`).join(' ')}`;
-
-    await processingMsg.edit(responseMessage);
-    await message.react('✅');
-    
-  } catch (error) {
-    console.error('❌ 記事処理エラー:', error);
-    
-    if (processingMsg) {
-      await processingMsg.edit('❌ 記事の処理に失敗しました。URLが正しいか確認してください。');
-    } else {
-      await message.reply('❌ 記事の処理に失敗しました。');
-    }
-    
-    await message.react('❌');
-  }
-}
+});
 
 // コマンド処理
 async function handleCommand(message: Message) {
-  const args = message.content.slice(1).trim().split(/ +/);
-  const command = args.shift()?.toLowerCase();
+  const command = message.content.slice(1).split(' ')[0].toLowerCase();
+  const args = message.content.slice(1).split(' ').slice(1);
 
   switch (command) {
-    case 'list':
-    case 'リスト':
-      await handleListCommand(message, args);
+    case 'test':
+    case 'テスト':
+      await testGeminiAPI(message);
+      break;
+    case '論文':
+    case 'paper':
+      await handlePaperCommand(message, args);
+      break;
+    case 'wap':
+      await handleWapCommand(message);
+      break;
+    case 'wav':
+      await handleWavCommand(message);
       break;
     case 'help':
     case 'ヘルプ':
-      await handleHelpCommand(message);
-      break;
-    case 'debug':
-    case 'デバッグ':
-      await handleDebugCommand(message);
-      break;
-    case 'test':
-    case 'テスト':
-      await handleTestCommand(message);
+      await showHelp(message);
       break;
     case 'stats':
     case '統計':
-      await handleStatsCommand(message);
+      await showStats(message);
       break;
-    case 'paper':
-    case '論文':
-      await handlePaperCommand(message, args);
+    case 'list':
+    case 'リスト':
+      await showRecentIdeas(message, args[0]);
       break;
     default:
-      await message.reply('❓ 不明なコマンドです。`!help` でヘルプを表示します。');
+      await message.reply('❓ 不明なコマンドです。`!help`でコマンド一覧を確認してください。');
   }
+}
+
+// !wap コマンド（画像からMidjourneyプロンプト生成）
+async function handleWapCommand(message: Message) {
+  const imageAttachment = message.attachments.find(att => 
+    att.contentType?.startsWith('image')
+  );
+  
+  if (!imageAttachment) {
+    return message.reply('❌ 画像を添付してください。\n使い方: `!wap` と画像を一緒に投稿');
+  }
+
+  // アスペクト比選択ボタンを作成
+  const row = new ActionRowBuilder<ButtonBuilder>()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId(`ar_16_9_${message.id}`)
+        .setLabel('16:9 (横長)')
+        .setStyle(ButtonStyle.Primary)
+        .setEmoji('🖼️'),
+      new ButtonBuilder()
+        .setCustomId(`ar_1_1_${message.id}`)
+        .setLabel('1:1 (正方形)')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('⬜'),
+      new ButtonBuilder()
+        .setCustomId(`ar_9_16_${message.id}`)
+        .setLabel('9:16 (縦長)')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('📱'),
+      new ButtonBuilder()
+        .setCustomId(`ar_4_5_${message.id}`)
+        .setLabel('4:5 (ポートレート)')
+        .setStyle(ButtonStyle.Secondary)
+        .setEmoji('🖼️')
+    );
+
+  const embed = new EmbedBuilder()
+    .setColor(0x5865F2)
+    .setTitle('🎨 アスペクト比を選択')
+    .setDescription('生成する画像のアスペクト比を選んでください')
+    .setImage(imageAttachment.url)
+    .setFooter({ text: '30秒以内に選択してください' });
+
+  const response = await message.reply({
+    embeds: [embed],
+    components: [row]
+  });
+
+  // 一時的にデータを保存
+  imagePromptData.set(message.id, {
+    imageUrl: imageAttachment.url,
+    userId: message.author.id,
+    timestamp: Date.now()
+  });
+  
+  // 30秒後にクリーンアップ
+  setTimeout(() => {
+    imagePromptData.delete(message.id);
+  }, 30000);
+}
+
+// !wav コマンド（音声からMidjourneyプロンプト生成）
+async function handleWavCommand(message: Message) {
+  const audioExtensions = ['.ogg', '.mp3', '.wav', '.m4a'];
+  const voiceAttachment = message.attachments.find(att => 
+    audioExtensions.some(ext => att.name?.toLowerCase().endsWith(ext))
+  );
+  
+  if (!voiceAttachment) {
+    return message.reply('❌ 音声ファイルを添付してください。\n使い方: `!wav` と音声ファイルを一緒に投稿');
+  }
+
+  const processingEmbed = new EmbedBuilder()
+    .setColor(0xFFFF00)
+    .setTitle('🎙️ 処理中...')
+    .setDescription('音声を文字起こししています...');
+  
+  const processingMsg = await message.reply({ embeds: [processingEmbed] });
+  
+  try {
+    // 音声を文字起こし
+    const transcription = await transcriptionService.transcribeAudio(
+      voiceAttachment.url,  // URLを直接渡す
+      voiceAttachment.name || 'audio'
+    );
+    
+    // プログレス更新
+    processingEmbed
+      .setDescription('✅ 文字起こし完了\n📝 英語プロンプトを生成中...')
+      .addFields({
+        name: '文字起こし内容',
+        value: transcription.length > 200 
+          ? transcription.substring(0, 200) + '...' 
+          : transcription
+      });
+    await processingMsg.edit({ embeds: [processingEmbed] });
+    
+    // 英語プロンプトを生成
+    const creativePrompt = await midjourneyService.generateCreativePrompt(transcription);
+    
+    // Midjourneyプロンプトを構築
+    const fullPrompt = midjourneyService.generateTextPrompt(creativePrompt);
+    
+    // 結果を表示
+    const resultEmbed = new EmbedBuilder()
+      .setColor(0x00FF00)
+      .setTitle('✅ 音声からプロンプト生成完了')
+      .addFields(
+        {
+          name: '🎙️ 文字起こし内容',
+          value: transcription.length > 300 
+            ? transcription.substring(0, 300) + '...' 
+            : transcription
+        },
+        {
+          name: '🎨 生成された英語プロンプト',
+          value: creativePrompt
+        },
+        {
+          name: '📋 Midjourneyプロンプト（コピー用）',
+          value: `\`\`\`${fullPrompt}\`\`\``
+        }
+      )
+      .setFooter({ text: 'プロンプトをコピーしてMidjourneyで使用してください' });
+    
+    await processingMsg.edit({ embeds: [resultEmbed] });
+    
+  } catch (error) {
+    console.error('音声処理エラー:', error);
+    const errorEmbed = new EmbedBuilder()
+      .setColor(0xFF0000)
+      .setTitle('❌ エラー')
+      .setDescription('音声の処理中にエラーが発生しました。');
+    await processingMsg.edit({ embeds: [errorEmbed] });
+  }
+}
+
+// 音声ファイル処理
+async function handleAttachments(message: Message) {
+  const audioExtensions = ['.ogg', '.mp3', '.wav', '.m4a'];
+  
+  for (const attachment of message.attachments.values()) {
+    const isAudio = audioExtensions.some(ext => attachment.name?.toLowerCase().endsWith(ext));
+    
+    if (isAudio) {
+      const reply = await message.reply('🎙️ 音声を文字起こし中...');
+      
+      try {
+        const transcription = await transcriptionService.transcribeAudio(
+          attachment.url,  // URLを直接渡す
+          attachment.name || 'audio'
+        );
+        
+        const timestamp = generateTimestamp();
+        const idea = {
+          timestamp,
+          content: transcription,
+          type: 'voice',
+          author: message.author.username,
+          channel: (message.channel as TextChannel).name,
+          tags: [],
+          metadata: { 
+            fileName: attachment.name,
+            duration: attachment.size ? `${Math.round(attachment.size / 1000)}KB` : undefined
+          }
+        };
+        
+        // Obsidian Vault チャンネルに投稿
+        const vaultChannel = await getObsidianVaultChannel(message.guild!);
+        const obsidianMarkdown = generateObsidianMarkdown(idea);
+        await vaultChannel.send(`\`\`\`markdown\n${obsidianMarkdown}\n\`\`\``);
+        
+        await reply.edit(`✅ 音声の文字起こしが完了しました！\n📅 タイムスタンプ: ${formatDateTimeForDisplay(timestamp)}`);
+        
+      } catch (error) {
+        console.error('音声処理エラー:', error);
+        await reply.edit('❌ 音声の文字起こしに失敗しました');
+      }
+    }
+  }
+}
+
+// 記事URL処理
+async function handleArticleURL(message: Message, url: string) {
+  const processingMsg = await message.reply('📰 記事を取得中...');
+  
+  try {
+    const article = await articleScraper.scrapeArticle(url);
+    const summary = await articleSummarizer.summarizeArticle(article);
+    
+    const timestamp = generateTimestamp();
+    const idea = {
+      timestamp,
+      content: summary,
+      type: 'article',
+      author: message.author.username,
+      channel: (message.channel as TextChannel).name,
+      tags: [],
+      metadata: {
+        url: url,
+        title: article.title,
+        author: article.author,
+        publishedDate: article.publishedDate
+      }
+    };
+    
+    // Obsidian Vault チャンネルに投稿
+    const vaultChannel = await getObsidianVaultChannel(message.guild!);
+    const obsidianMarkdown = generateObsidianMarkdown(idea);
+    await vaultChannel.send(`\`\`\`markdown\n${obsidianMarkdown}\n\`\`\``);
+    
+    const embed = new EmbedBuilder()
+      .setColor(0x0099FF)
+      .setTitle(article.title || '記事')
+      .setURL(url)
+      .setDescription(summary)
+      .setFooter({ text: `保存済み | タイムスタンプ: ${formatDateTimeForDisplay(timestamp)}` });
+    
+    await processingMsg.edit({ content: '✅ 記事を要約しました！', embeds: [embed] });
+    
+  } catch (error) {
+    console.error('記事処理エラー:', error);
+    await processingMsg.edit('❌ 記事の取得または要約に失敗しました');
+  }
+}
+
+// テキストメッセージ処理
+async function handleTextMessage(message: Message) {
+  const timestamp = generateTimestamp();
+  const idea = {
+    timestamp,
+    content: message.content,
+    type: 'text',
+    author: message.author.username,
+    channel: (message.channel as TextChannel).name,
+    tags: []
+  };
+  
+  // Obsidian Vault チャンネルに投稿
+  const vaultChannel = await getObsidianVaultChannel(message.guild!);
+  const obsidianMarkdown = generateObsidianMarkdown(idea);
+  await vaultChannel.send(`\`\`\`markdown\n${obsidianMarkdown}\n\`\`\``);
+  
+  await message.reply(`💡 アイデアを保存しました！\n📅 タイムスタンプ: ${formatDateTimeForDisplay(timestamp)}`);
 }
 
 // 論文コマンド処理
 async function handlePaperCommand(message: Message, args: string[]) {
-  const subCommand = args[0];
-  
-  if (!isTextBasedChannel(message.channel)) {
-    await message.reply('このチャンネルではこのコマンドは使用できません。');
-    return;
+  if (args.length === 0) {
+    await showPaperMenu(message);
+  } else if (args[0] === 'select') {
+    await selectPapers(message, args.slice(1));
+  } else {
+    const query = args.join(' ');
+    await searchPapers(message, query);
   }
-  
-  // 番号での選択処理
-  if (subCommand === 'select' || subCommand === '選択') {
-    const selections = args.slice(1).join(' ');
-    
-    if (!selections) {
-      await message.reply('選択する論文の番号を指定してください。例: `!paper select 1,3,5` または `!paper select 1-3`');
-      return;
-    }
-    
-    if (!lastPaperSearch || lastPaperSearch.channelId !== message.channel.id) {
-      await message.reply('先に論文を検索してください。');
-      return;
-    }
-    
-    // 選択番号をパース
-    const selectedNumbers: number[] = [];
-    const parts = selections.split(/[,\s]+/);
-    
-    for (const part of parts) {
-      if (part.includes('-')) {
-        const [start, end] = part.split('-').map(n => parseInt(n.trim()));
-        if (!isNaN(start) && !isNaN(end)) {
-          for (let i = start; i <= end; i++) {
-            selectedNumbers.push(i);
-          }
-        }
-      } else {
-        const num = parseInt(part.trim());
-        if (!isNaN(num)) {
-          selectedNumbers.push(num);
-        }
-      }
-    }
-    
-    const uniqueNumbers = [...new Set(selectedNumbers)].sort((a, b) => a - b);
-    const validNumbers = uniqueNumbers.filter(
-      num => num >= 1 && num <= (lastPaperSearch?.papers.length || 0)
-    );
-    
-    if (validNumbers.length === 0) {
-      await message.reply(`1から${lastPaperSearch.papers.length}の番号を指定してください。`);
-      return;
-    }
-    
-    // 処理開始
-    const processingEmbed = new EmbedBuilder()
-      .setColor(0xFFFF00)
-      .setTitle('🤖 論文を処理中...')
-      .setDescription(`${validNumbers.length}件の論文を要約します`)
-      .setFooter({ text: '少々お待ちください...' });
-    
-    const processingMsg = await message.channel.send({ embeds: [processingEmbed] });
-    
-    const successfulPapers: { paper: any; idea: any; summary: any }[] = [];
-    const failedPapers: { paper: any; error: string }[] = [];
-    
-    // 各論文を処理
-    for (let i = 0; i < validNumbers.length; i++) {
-      const num = validNumbers[i];
-      const selectedPaper = arxivService.getSearchResult(num - 1);
-      
-      if (!selectedPaper) {
-        failedPapers.push({ 
-          paper: { title: `論文 #${num}` }, 
-          error: '選択に失敗しました' 
-        });
-        continue;
-      }
-      
-      // 進行状況を更新
-      const progressEmbed = new EmbedBuilder()
-        .setColor(0xFFFF00)
-        .setTitle('🤖 論文を処理中...')
-        .setDescription(`処理中: ${i + 1}/${validNumbers.length}件`)
-        .addFields({
-          name: '現在の論文',
-          value: selectedPaper.title.substring(0, 100) + '...',
-          inline: false
-        })
-        .setFooter({ text: `進行状況: ${Math.round((i + 1) / validNumbers.length * 100)}%` });
-      
-      await processingMsg.edit({ embeds: [progressEmbed] });
-      
-      try {
-        const summary = await paperSummarizer.summarizePaper(selectedPaper);
-        
-        const idea = await ideaManager.addPaperIdea(
-          {
-            arxivId: selectedPaper.arxivId,
-            title: selectedPaper.title,
-            authors: selectedPaper.authors,
-            publishedDate: selectedPaper.published.toISOString(),
-            categories: selectedPaper.categories,
-            pdfUrl: selectedPaper.pdfUrl,
-            abstract: selectedPaper.abstract
-          },
-          summary
-        );
-        
-        // Obsidian Vaultチャンネルに投稿
-        const vaultChannel = await getObsidianVaultChannel(message.guild!);
-        const markdown = generatePaperMarkdown(idea, selectedPaper, summary);
-        
-        if (markdown.length > 1900) {
-          const chunks = splitMarkdown(markdown, 1900);
-          for (const chunk of chunks) {
-            await vaultChannel.send(`\`\`\`markdown\n${chunk}\n\`\`\``);
-          }
-        } else {
-          await vaultChannel.send(`\`\`\`markdown\n${markdown}\n\`\`\``);
-        }
-        
-        successfulPapers.push({ paper: selectedPaper, idea, summary });
-        
-      } catch (error) {
-        console.error(`論文 #${num} の処理エラー:`, error);
-        failedPapers.push({ 
-          paper: selectedPaper, 
-          error: '要約に失敗しました' 
-        });
-      }
-      
-      if (i < validNumbers.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 1000));
-      }
-    }
-    
-    // 結果を表示
-    const resultEmbed = new EmbedBuilder()
-      .setColor(successfulPapers.length > 0 ? 0x00FF00 : 0xFF0000)
-      .setTitle('📚 論文処理完了')
-      .setDescription(
-        `✅ 成功: ${successfulPapers.length}件\n` +
-        `❌ 失敗: ${failedPapers.length}件`
-      );
-    
-    if (successfulPapers.length > 0) {
-      // 最初の論文の詳細を表示
-      const firstPaper = successfulPapers[0];
-      resultEmbed.addFields({
-        name: `📖 ${firstPaper.paper.title.substring(0, 100)}...`,
-        value: `**要約**: ${firstPaper.summary.summary.substring(0, 300)}...\n` +
-               `**タグ**: ${firstPaper.summary.tags.slice(0, 5).map((t: string) => `#${t}`).join(' ')}`,
-        inline: false
-      });
-      
-      // 残りの論文リスト
-      if (successfulPapers.length > 1) {
-        const otherPapers = successfulPapers.slice(1).map(({ paper, idea }) => {
-          const shortTitle = paper.title.length > 50 
-            ? paper.title.substring(0, 50) + '...' 
-            : paper.title;
-          return `**#${idea.id}** ${shortTitle}`;
-        }).join('\n');
-        
-        resultEmbed.addFields({
-          name: '📚 その他の保存論文',
-          value: otherPapers.substring(0, 1024),
-          inline: false
-        });
-      }
-    }
-    
-    resultEmbed.addFields({
-      name: '💾 保存先',
-      value: '全ての論文要約は #obsidian-vault チャンネルに保存されました',
-      inline: false
+}
+
+// 論文メニュー表示
+async function showPaperMenu(message: Message) {
+  const embed = new EmbedBuilder()
+    .setColor(0x00AE86)
+    .setTitle('📚 論文検索メニュー')
+    .setDescription('検索したいカテゴリーの番号を入力してください')
+    .addFields(
+      { name: '1. AI・機械学習', value: '最新のAI・ML研究', inline: true },
+      { name: '2. 自然言語処理', value: 'NLP・言語モデル', inline: true },
+      { name: '3. コンピュータビジョン', value: '画像認識・生成', inline: true },
+      { name: '4. ロボティクス', value: 'ロボット工学', inline: true },
+      { name: '5. 量子コンピュータ', value: '量子計算・量子情報', inline: true },
+      { name: '6. 医療・ヘルスケアAI', value: '医療AI応用', inline: true },
+      { name: '7. 建設・建築技術', value: '建設技術・BIM', inline: true },
+      { name: '8. 自動運転', value: '自動運転技術', inline: true },
+      { name: '9. セキュリティ・暗号', value: '情報セキュリティ', inline: true }
+    )
+    .addFields({
+      name: '💡 使い方',
+      value: '`!論文 1` のように番号を入力\n`!論文 AIロボット` のように自由検索も可能'
     });
-    
-    resultEmbed.setFooter({ 
-      text: `処理時間: 約${validNumbers.length * 2}秒` 
-    });
-    
-    await processingMsg.edit({ embeds: [resultEmbed] });
-    
-    if (successfulPapers.length > 0) {
-      await message.react('✅');
-    } else {
-      await message.react('❌');
-    }
-    
-    return;
-  }
   
-  // メインメニューを表示
-  if (!subCommand) {
-    const menuEmbed = new EmbedBuilder()
-      .setColor(0x9B59B6)
-      .setTitle('📚 論文検索メニュー')
-      .setDescription('検索したいカテゴリーの番号を入力してください')
-      .addFields(
-        Object.entries(paperCategories).map(([num, cat]) => ({
-          name: `${num}. ${cat.name}`,
-          value: '　',
-          inline: true
-        }))
-      )
-      .addFields([
-        { name: '\u200B', value: '\u200B', inline: false },
-        { name: '💡 使い方', value: '`!論文 1` のように番号を入力\n`!論文 AIロボット` のように自由検索も可能', inline: false }
-      ])
-      .setFooter({ text: '最新の研究論文をarXivから検索します' });
-    
-    await message.channel.send({ embeds: [menuEmbed] });
-    return;
-  }
-  
-  // カテゴリー番号が入力された場合
-  if (subCommand && paperCategories[subCommand]) {
-    const category = paperCategories[subCommand];
-    await message.channel.send(`🔍 「${category.name}」の最新論文を検索中...`);
-    
-    try {
-      const papers = await arxivService.searchPapers(category.query, 10);
-      
-      if (papers.length === 0) {
-        await message.channel.send('論文が見つかりませんでした。');
-        return;
-      }
-      
-      lastPaperSearch = { channelId: message.channel.id, papers };
-      
-      const resultsEmbed = new EmbedBuilder()
-        .setColor(0x9B59B6)
-        .setTitle(`📚 ${category.name}の検索結果`)
-        .setDescription('読みたい論文の番号を選択してください')
-        .setFooter({ text: `${papers.length}件の論文が見つかりました | 選択: !paper select [番号]` });
-      
-      papers.forEach((paper, index) => {
-        const date = paper.published.toLocaleDateString('ja-JP');
-        const authors = paper.authors.slice(0, 2).join(', ');
-        const authorText = paper.authors.length > 2 ? `${authors} 他` : authors;
-        
-        const shortTitle = paper.title.length > 60 
-          ? paper.title.substring(0, 60) + '...' 
-          : paper.title;
-        
-        resultsEmbed.addFields({
-          name: `${index + 1}. ${shortTitle}`,
-          value: `👥 ${authorText} | 📅 ${date}`,
-          inline: false
-        });
-      });
-      
-      await message.channel.send({ embeds: [resultsEmbed] });
-      
-    } catch (error) {
-      console.error('論文検索エラー:', error);
-      await message.channel.send('❌ 論文の検索中にエラーが発生しました。');
-    }
-    return;
-  }
-  
-  // 自由検索
-  const freeSearchQuery = args.join(' ');
-  await message.channel.send(`🔍 「${freeSearchQuery}」を検索中...`);
+  await message.reply({ embeds: [embed] });
+}
+
+// 論文検索
+async function searchPapers(message: Message, query: string) {
+  const searchingMsg = await message.reply('🔍 論文を検索中...');
   
   try {
-    const englishQuery = await paperSummarizer.translateSearchQuery(freeSearchQuery);
-    await message.channel.send(`🌐 検索キーワード: ${englishQuery}`);
-    
-    const papers = await arxivService.searchPapers(englishQuery, 10);
+    const papers = await arxivService.searchPapers(query);
     
     if (papers.length === 0) {
-      await message.channel.send('論文が見つかりませんでした。別のキーワードで試してみてください。');
+      await searchingMsg.edit('📭 該当する論文が見つかりませんでした');
       return;
     }
     
-    lastPaperSearch = { channelId: message.channel.id, papers };
+    lastPaperSearch = {
+      channelId: message.channel.id,
+      papers: papers
+    };
     
-    const resultsEmbed = new EmbedBuilder()
-      .setColor(0x9B59B6)
-      .setTitle(`📚 「${freeSearchQuery}」の検索結果`)
-      .setDescription('読みたい論文の番号を選択してください')
-      .setFooter({ text: `${papers.length}件の論文が見つかりました | 選択: !paper select [番号]` });
-    
-    papers.forEach((paper, index) => {
-      const date = paper.published.toLocaleDateString('ja-JP');
-      const authors = paper.authors.slice(0, 2).join(', ');
-      const authorText = paper.authors.length > 2 ? `${authors} 他` : authors;
-      
-      const shortTitle = paper.title.length > 60 
-        ? paper.title.substring(0, 60) + '...' 
-        : paper.title;
-      
-      resultsEmbed.addFields({
-        name: `${index + 1}. ${shortTitle}`,
-        value: `👥 ${authorText} | 📅 ${date}`,
-        inline: false
-      });
+    let response = '📚 **論文検索結果**\n\n';
+    papers.slice(0, 10).forEach((paper, index) => {
+      response += `**${index + 1}.** ${paper.title}\n`;
+      response += `   著者: ${paper.authors.slice(0, 3).join(', ')}${paper.authors.length > 3 ? ' 他' : ''}\n`;
+      response += `   公開日: ${paper.published}\n\n`;
     });
     
-    await message.channel.send({ embeds: [resultsEmbed] });
+    response += '\n📌 論文を選択: `!paper select 1,3,5` または `!paper select 1-3`';
+    
+    await searchingMsg.edit(response);
     
   } catch (error) {
     console.error('論文検索エラー:', error);
-    await message.channel.send('❌ 論文の検索中にエラーが発生しました。');
+    await searchingMsg.edit('❌ 論文の検索に失敗しました');
   }
 }
 
-// その他のコマンドハンドラー関数...
-async function handleListCommand(message: Message, args: string[]) {
-  const channel = args[0];
-  const ideas = ideaManager.getRecentIdeas(10, channel);
-  
-  if (ideas.length === 0) {
-    await message.reply('📝 アイデアがまだありません。');
+// 論文選択処理
+async function selectPapers(message: Message, args: string[]) {
+  if (!lastPaperSearch || lastPaperSearch.channelId !== message.channel.id) {
+    await message.reply('❌ 先に論文を検索してください');
     return;
   }
   
-  let response = channel 
-    ? `📋 **${channel}** の最近のアイデア:\n\n`
-    : '📋 **最近のアイデア一覧:**\n\n';
+  // ここでlastPaperSearchは確実に存在する
+  const papers = lastPaperSearch.papers;
   
-  ideas.forEach(idea => {
-    const date = new Date(idea.createdAt).toLocaleString('ja-JP');
-    const typeIcon = idea.type === 'voice' ? '🎤' : 
-                    idea.type === 'article' ? '📰' : 
-                    idea.type === 'paper' ? '📚' : '💡';
-    const tags = idea.tags.length > 0 ? ` [${idea.tags.map(t => `#${t}`).join(' ')}]` : '';
-    
-    response += `${typeIcon} **#${idea.id}** - ${idea.channel} - ${date}${tags}\n`;
-    
-    if (idea.type === 'article') {
-      const articleIdea = idea as any;
-      response += `   📎 ${articleIdea.articleData.title.substring(0, 50)}${articleIdea.articleData.title.length > 50 ? '...' : ''}\n`;
-    } else if (idea.type === 'paper') {
-      const paperIdea = idea as any;
-      const title = paperIdea.paperMetadata.arxivId;
-      response += `   📎 arXiv:${title}\n`;
+  const processingMsg = await message.reply('📝 論文を処理中...');
+  const selectedIndices: number[] = [];
+  
+  // インデックスのパース
+  for (const arg of args) {
+    if (arg.includes('-')) {
+      const [start, end] = arg.split('-').map(n => parseInt(n) - 1);
+      for (let i = start; i <= end && i < papers.length; i++) {
+        selectedIndices.push(i);
+      }
+    } else if (arg.includes(',')) {
+      arg.split(',').forEach(n => {
+        const index = parseInt(n) - 1;
+        if (index >= 0 && index < papers.length) {
+          selectedIndices.push(index);
+        }
+      });
     } else {
-      response += `   ${idea.content.substring(0, 50)}${idea.content.length > 50 ? '...' : ''}\n`;
+      const index = parseInt(arg) - 1;
+      if (index >= 0 && index < papers.length) {
+        selectedIndices.push(index);
+      }
     }
-    response += '\n';
-  });
+  }
   
-  await message.reply(response);
+  if (selectedIndices.length === 0) {
+    await processingMsg.edit('❌ 有効な番号を指定してください');
+    return;
+  }
+  
+  // 論文を処理
+  const results = [];
+  const vaultChannel = await getObsidianVaultChannel(message.guild!);
+  
+  for (const index of selectedIndices) {
+    try {
+      const paper = papers[index];
+      const summary = await paperSummarizer.summarizePaper(paper);
+      
+      const timestamp = generateTimestamp();
+      const idea = {
+        timestamp,
+        content: summary.summary,
+        type: 'paper',
+        author: message.author.username,
+        channel: (message.channel as TextChannel).name,
+        tags: summary.tags || [],
+        metadata: {
+          title: paper.title,
+          authors: paper.authors.join(', '),
+          category: paper.categories.join(', '),
+          arxivId: paper.id,
+          url: paper.link,
+          abstract: paper.summary
+        }
+      };
+      
+      // detailedSummaryが存在する場合のみ追加
+      const additionalInfo = summary.keyFindings ? {
+        detailedSummary: `**重要な発見:**\n${summary.keyFindings.join('\n')}\n\n**応用可能性:**\n${summary.applications}`
+      } : undefined;
+      
+      const obsidianMarkdown = generateObsidianMarkdown(idea, additionalInfo);
+      await vaultChannel.send(`\`\`\`markdown\n${obsidianMarkdown}\n\`\`\``);
+      
+      results.push({
+        success: true,
+        timestamp: timestamp,
+        title: paper.title.substring(0, 50) + '...'
+      });
+      
+    } catch (error) {
+      console.error(`論文処理エラー:`, error);
+      results.push({ success: false });
+    }
+  }
+  
+  // 結果を表示
+  const successCount = results.filter(r => r.success).length;
+  const failCount = results.filter(r => !r.success).length;
+  
+  let resultMsg = `📊 **論文処理完了**\n✅ 成功: ${successCount}件 ❌ 失敗: ${failCount}件\n\n`;
+  
+  if (successCount > 0) {
+    resultMsg += '**📚 保存された論文**\n';
+    results.filter(r => r.success).forEach(r => {
+      resultMsg += `**${formatDateTimeForDisplay(r.timestamp!)}** ${r.title}\n`;
+    });
+  }
+  
+  resultMsg += '\n✅ Obsidian Vaultチャンネルに保存されました';
+  
+  await processingMsg.edit(resultMsg);
 }
 
-async function handleStatsCommand(message: Message) {
-  const stats = ideaManager.getStats();
-  
-  let response = `📊 **アイデア統計情報**
-
-**総数**: ${stats.total}件
-- 💡 テキスト: ${stats.text}件
-- 🎤 音声: ${stats.voice}件
-- 📰 記事: ${stats.article}件
-- 📚 論文: ${stats.paper}件
-
-**チャンネル別**:
-`;
-  
-  Object.entries(stats.byChannel).forEach(([channel, count]) => {
-    response += `- #${channel}: ${count}件\n`;
-  });
-  
-  await message.reply(response);
-}
-
-async function handleDebugCommand(message: Message) {
-  const stats = ideaManager.getStats();
-  const debugInfo = `
-🔧 **デバッグ情報**
-
-**環境変数:**
-- Obsidian Path: \`${process.env.OBSIDIAN_VAULT_PATH}\`
-- Discord_memo Path: \`${path.join(process.env.OBSIDIAN_VAULT_PATH || '', 'AI_MEMO', 'Discord_memo')}\`
-
-**対象チャンネル:**
-${MONITORED_CHANNELS.map(ch => `• #${ch}`).join('\n')}
-
-**機能:**
-- 音声文字起こし: ✅ 有効
-- 記事自動要約: ✅ 有効
-- 論文収集: ✅ 有効
-- Obsidian Vault: ✅ 有効
-
-**保存済みアイデア:**
-- 総数: ${stats.total}件
-- テキスト: ${stats.text}件
-- 音声: ${stats.voice}件
-- 記事: ${stats.article}件
-- 論文: ${stats.paper}件
-  `;
-  
-  await message.reply(debugInfo);
-}
-
-async function handleTestCommand(message: Message) {
+// Gemini APIテスト
+async function testGeminiAPI(message: Message) {
   try {
-    const testResult = await transcriptionService.testAPI();
-    if (testResult) {
-      await message.reply('✅ Gemini API テスト成功！音声文字起こし機能が利用可能です。');
-    } else {
-      await message.reply('❌ Gemini API テスト失敗。API Keyを確認してください。');
-    }
+    const testPrompt = "こんにちは！テストです。";
+    const response = await articleSummarizer.summarizeArticle({ 
+      content: testPrompt, 
+      title: 'Test',
+      url: '',
+      author: '',
+      publishedDate: ''
+    });
+    await message.reply(`✅ Gemini API テスト成功: ${response}`);
   } catch (error) {
-    await message.reply('❌ テスト中にエラーが発生しました。');
+    console.error('Gemini APIテストエラー:', error);
+    await message.reply('❌ Gemini API テスト失敗');
   }
 }
 
-async function handleHelpCommand(message: Message) {
-  const helpText = `
-🤖 **Voice Transcriber Bot - ヘルプ**
-
-**基本機能:**
-- 対象チャンネルでの投稿を自動的に番号付けして保存
-- 音声ファイルは自動で文字起こし（Gemini API使用）
-- URLは自動で記事を取得・要約
-- arXivから論文を検索・要約
-- 全ての内容を #obsidian-vault チャンネルに自動保存
-
-**コマンド:**
-- \`!list\` または \`!リスト\` - 最近10件のアイデア一覧
-- \`!list [チャンネル名]\` - 特定チャンネルのアイデア一覧
-- \`!stats\` または \`!統計\` - アイデアの統計情報
-- \`!paper\` または \`!論文\` - 論文検索機能
-- \`!help\` または \`!ヘルプ\` - このヘルプを表示
-- \`!debug\` または \`!デバッグ\` - デバッグ情報を表示
-- \`!test\` または \`!テスト\` - Gemini APIのテスト
-
-**対象チャンネル:**
-${MONITORED_CHANNELS.map(ch => `• #${ch}`).join('\n')}
-
-**音声文字起こし:**
-- 対応形式: .ogg, .mp3, .wav, .m4a
-- 自動で日本語に文字起こし
-
-**記事自動要約:**
-- URLを含むメッセージを投稿すると自動で要約
-- 記事のタイトル、著者、投稿日なども保存
-
-**論文収集:**
-- \`!論文\` - メニューから選択
-- \`!論文 [番号]\` - カテゴリーから検索
-- \`!論文 [キーワード]\` - 自由検索
-- \`!paper select [番号]\` - 論文を選択（複数可）
-
-**保存形式:**
-- ファイル名: type_YYYYMMDD_HHMMSS.md
-- 保存先: #obsidian-vault チャンネル
-- 形式: Markdown（コピペ可能）
-  `;
+// ヘルプ表示
+async function showHelp(message: Message) {
+  const embed = new EmbedBuilder()
+    .setColor(0x0099FF)
+    .setTitle('📖 ヘルプ')
+    .setDescription('Voice Transcriber Botの使い方')
+    .addFields(
+      { name: '🎙️ 音声メモ', value: '音声ファイルを投稿すると自動で文字起こし' },
+      { name: '💡 テキストメモ', value: '監視対象チャンネルに投稿すると自動保存' },
+      { name: '📰 記事要約', value: 'URLを含むメッセージを投稿すると自動要約' },
+      { name: '📚 論文検索', value: '`!論文` でメニュー表示\n`!論文 [検索語]` で検索' },
+      { name: '🖼️ Midjourney (画像)', value: '`!wap` と画像を投稿してプロンプト生成' },
+      { name: '🎙️ Midjourney (音声)', value: '`!wav` と音声を投稿してプロンプト生成' },
+      { name: '📊 統計', value: '`!stats` で保存状況を確認' },
+      { name: '📋 一覧', value: '`!list` で最近のアイデア一覧' },
+      { name: '🧪 テスト', value: '`!test` でAPI動作確認' }
+    )
+    .addFields({
+      name: '📁 保存先',
+      value: '#obsidian-vault チャンネルに自動投稿'
+    })
+    .addFields({
+      name: '💡 Midjourneyコマンドについて',
+      value: '`!wap`と`!wav`は全チャンネルで使用可能です'
+    });
   
-  await message.reply(helpText);
+  await message.reply({ embeds: [embed] });
 }
 
-// エラーハンドリング
-client.on('error', (error) => {
-  console.error('❌ エラーが発生しました:', error);
-});
+// 統計表示
+async function showStats(message: Message) {
+  const stats = ideaManager.getStats();
+  const embed = new EmbedBuilder()
+    .setColor(0x00D166)
+    .setTitle('📊 統計情報')
+    .addFields(
+      { name: '💡 総アイデア数', value: stats.total.toString(), inline: true },
+      { name: '🎙️ 音声メモ', value: stats.voice.toString(), inline: true },
+      { name: '📝 テキスト', value: stats.text.toString(), inline: true },
+      { name: '📰 記事', value: stats.article.toString(), inline: true },
+      { name: '📚 論文', value: stats.paper.toString(), inline: true }
+    );
+  
+  await message.reply({ embeds: [embed] });
+}
+
+// 最近のアイデア表示
+async function showRecentIdeas(message: Message, channelFilter?: string) {
+  const ideas = ideaManager.getRecentIdeas(10, channelFilter);
+  
+  if (ideas.length === 0) {
+    await message.reply('📭 アイデアがまだありません');
+    return;
+  }
+  
+  let response = '📋 **最近のアイデア**\n\n';
+  ideas.forEach((idea: any) => {
+    const icon = idea.type === 'voice' ? '🎙️' : 
+                 idea.type === 'article' ? '📰' : 
+                 idea.type === 'paper' ? '📚' : '💡';
+    const timestamp = idea.timestamp || 'unknown';
+    const author = idea.author || 'unknown';
+    const channel = idea.channel || 'unknown';
+    const content = idea.content || '';
+    
+    response += `${icon} **${timestamp}** - ${author} in #${channel}\n`;
+    response += `   ${content.substring(0, 50)}...\n\n`;
+  });
+  
+  await message.reply(response);
+}
+
+// 古いデータのクリーンアップ（30分ごと）
+setInterval(() => {
+  const now = Date.now();
+  const timeout = 30 * 60 * 1000; // 30分
+  
+  for (const [key, value] of imagePromptData.entries()) {
+    if (now - value.timestamp > timeout) {
+      imagePromptData.delete(key);
+    }
+  }
+}, 30 * 60 * 1000);
 
 // Botをログイン
 client.login(process.env.DISCORD_TOKEN);
