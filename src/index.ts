@@ -313,6 +313,11 @@ async function handleMidjourneyImage(message: Message, imageAttachment: Attachme
     timestamp: Date.now()
   });
   
+  console.log(`🖼️ 画像URL保存: ${imageAttachment.url}`);
+  console.log(`👤 ユーザーID: ${message.author.id}`);
+  console.log(`📝 ファイル名: ${imageAttachment.name}`);
+  console.log(`📏 ファイルサイズ: ${imageAttachment.size} bytes`);
+  
   // 30秒後にタイムアウト
   setTimeout(() => {
     if (imagePromptData.has(message.author.id)) {
@@ -457,6 +462,9 @@ async function handleAspectRatioSelection(message: Message) {
     prompt += ` --ar ${aspectRatio}`;
     
     console.log(`📝 生成されたプロンプト: ${prompt}`);
+    console.log(`🖼️ 使用された画像URL: ${data.imageUrl || 'なし'}`);
+    console.log(`🎯 アスペクト比: ${aspectRatio}`);
+    console.log(`📱 プロンプトタイプ: ${data.type}`);
     
     // プロンプトを送信（コピーしやすい形式で）
     if (message.channel.type === 0) { // TextChannelの場合
