@@ -443,8 +443,8 @@ async function handleAspectRatioSelection(message: Message) {
     let prompt = '';
     
     if (data.type === 'image' && data.imageUrl) {
-      // 画像の場合 - 汎用的な線画変換（どんな写真でも対応）
-      prompt = `${data.imageUrl} line art, black and white illustration`;
+      // 画像の場合 - 人物を避けて純粋に線画変換
+      prompt = `${data.imageUrl} convert this exact scene to line drawing, no people, no faces, no humans, architectural line art style, building and infrastructure only`;
     } else if (data.type === 'audio' && data.prompt) {
       // 音声の場合
       prompt = data.prompt;
