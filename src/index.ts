@@ -450,12 +450,12 @@ async function handleAspectRatioSelection(message: Message) {
       prompt = data.prompt;
     }
     
-    // スタイルリファレンスがある場合は追加（一時的に無効化）
-    if (false && process.env.MIDJOURNEY_SREF_URL) {
+    // スタイルリファレンスがある場合は追加
+    if (process.env.MIDJOURNEY_SREF_URL) {
       prompt += ` --sref ${process.env.MIDJOURNEY_SREF_URL} --sw 1000 --stylize 1000`;
       console.log(`🎨 スタイルリファレンスを追加: ${process.env.MIDJOURNEY_SREF_URL}`);
     } else {
-      console.log('⚠️ スタイルリファレンスを無効化中（テスト）');
+      console.log('⚠️ MIDJOURNEY_SREF_URLが設定されていません');
     }
     
     // 選択されたアスペクト比を追加
